@@ -1,0 +1,42 @@
+body {
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  background: #000;
+  font-family: Arial, sans-serif;
+  cursor: none; /* Hide default cursor for FPS style */
+}
+
+#container {
+  position: absolute;
+  width: 100%;
+  height: 100%;
+}
+
+#ui {
+  position: absolute;
+  bottom: 20px;
+  left: 20px;
+  color: white;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 10px;
+  border-radius: 5px;
+  pointer-events: none; /* Allow clicks to pass through to canvas */
+}
+
+#training-ui {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  color: white;
+  background: rgba(0, 0, 0, 0.7);
+  padding: 10px;
+  border-radius: 5px;
+  font-family: Arial, sans-serif;
+  z-index: 1000;
+}
+
+/* Custom cursor for when mouse is locked */
+body:not(:-moz-window-inactive) {
+  cursor: none;
+}
