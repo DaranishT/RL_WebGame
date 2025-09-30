@@ -31,7 +31,7 @@ class SphereGame {
     // Load Ammo.js
     await new Promise(resolve => {
       const script = document.createElement('script');
-      script.src = '/src/ammo.js';
+      script.src = '/ammo.js';
       script.onload = () => {
         Ammo().then(loadedAmmo => {
           window.Ammo = loadedAmmo;
