@@ -9,6 +9,7 @@ import { SphereController } from './components/sphere-controller.js';
 import { LevelBuilder } from './components/level-builder.js';
 import { Crosshair } from './components/crosshair.js';
 import { GridGenerator } from './components/grid-generator.js';
+import { DungeonGenerator } from './components/dungeon-generator.js';
 import { TrainingUI } from './components/training-ui.js';
 import { GoalPoint } from './components/goal-point.js';
 
@@ -16,13 +17,18 @@ class SphereGame {
   constructor() {
     console.log("SphereGame constructor");
     this.goalCooldown = false;
+    
+    // Toggle between grid and dungeon
+    this.useDungeonGenerator = true;
+    this.currentGenerator = null;
+    
     this._Initialize();
   }
 
   async _Initialize() {
     console.log("Initializing SphereGame");
 
-    // --- Load Ammo.js ---
+    // Load Ammo.js
     await new Promise(resolve => {
       const script = document.createElement('script');
       script.src = '/src/ammo.js';
@@ -43,7 +49,7 @@ class SphereGame {
     });
     console.log("Ammo.js loaded");
 
-    // --- Load Three.js ---
+    // Load Three.js
     await new Promise(resolve => {
       const script = document.createElement('script');
       script.src = 'https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js';
@@ -54,41 +60,61 @@ class SphereGame {
 
     this.entityManager = new entity_manager.EntityManager();
 
-    // --- Three.js scene ---
+    // Three.js scene
     const threejs = new entity.Entity();
     threejs.AddComponent(new ThreeJSController());
     this.entityManager.Add(threejs, 'threejs');
-    threejs.isInit = true;
 
     this.scene = threejs.GetComponent('ThreeJSController').scene;
     this.camera = threejs.GetComponent('ThreeJSController').camera;
 
-    // --- Physics ---
+    // Physics
     const ammojs = new entity.Entity();
     ammojs.AddComponent(new AmmoJSController());
     this.entityManager.Add(ammojs, 'physics');
-    ammojs.isInit = true;
 
-    // --- Lighting & Sky ---
+    // Lighting & Sky
     const level = new entity.Entity();
     level.AddComponent(new LevelBuilder({
       scene: this.scene
     }));
     this.entityManager.Add(level, 'level');
 
-    // --- Grid Environment for RL Training ---
+    // Grid Environment for RL Training
     const grid = new entity.Entity();
-    const gridComponent = new GridGenerator({
-      scene: this.scene,
-      gridSize: 180,
-      cellSize: 6,
-      tunnelHeight: 10,
-      tunnelWidth: 2
-    });
+    
+    let gridComponent;
+    if (this.useDungeonGenerator) {
+      gridComponent = new DungeonGenerator({
+        scene: this.scene,
+        gridSize: 180,
+        cellSize: 6,
+        tunnelHeight: 10,
+        // Dungeon parameters
+        numRoomTries: 80,
+        minRoomSize: 3,
+        maxRoomSize: 7,
+        maxRooms: 12,
+        windingPercent: 40
+      });
+      this.currentGenerator = 'DungeonGenerator';
+    } else {
+      gridComponent = new GridGenerator({
+        scene: this.scene,
+        gridSize: 180,
+        cellSize: 6,
+        tunnelHeight: 10,
+        tunnelWidth: 2
+      });
+      this.currentGenerator = 'GridGenerator';
+    }
+    
     grid.AddComponent(gridComponent);
     this.entityManager.Add(grid, 'grid');
 
-    // --- Player with safe spawn position ---
+    console.log(`Using ${this.currentGenerator} for environment`);
+
+    // Player
     const player = new entity.Entity();
     const sphereController = new SphereController({
       scene: this.scene,
@@ -97,7 +123,7 @@ class SphereGame {
     player.AddComponent(sphereController);
     this.entityManager.Add(player, 'player');
 
-    // --- Camera ---
+    // Camera
     const cameraEntity = new entity.Entity();
     const thirdPersonCamera = new ThirdPersonCamera({
       camera: this.camera,
@@ -106,7 +132,7 @@ class SphereGame {
     cameraEntity.AddComponent(thirdPersonCamera);
     this.entityManager.Add(cameraEntity, 'camera');
 
-    // --- Crosshair ---
+    // Crosshair
     this.crosshair = new Crosshair({
       size: 14,
       color: 'white',
@@ -121,10 +147,10 @@ class SphereGame {
       }
     });
 
-    // --- Training UI ---
+    // Training UI
     this.trainingUI = new TrainingUI();
 
-    // --- RL Training Tracking ---
+    // RL Training Tracking
     this.trainingEpisode = {
       startTime: null,
       visitedCells: 0,
@@ -133,7 +159,7 @@ class SphereGame {
       episodeCount: 0
     };
 
-    // --- Initialize ---
+    // Initialize
     this._PostInitialize();
 
     // Set safe spawn position after initialization
@@ -141,7 +167,6 @@ class SphereGame {
       this.SetSafeSpawnPosition();
       
       this.previousRAF = null;
-      // Use bind to maintain the correct 'this' context
       this.RAF = this.RAF.bind(this);
       this.RAF();
       console.log("Game started successfully");
@@ -156,23 +181,55 @@ class SphereGame {
     const playerEntity = this.entityManager.Get('player');
     
     if (gridEntity && playerEntity) {
-      const gridComponent = gridEntity.GetComponent('GridGenerator');
-      const safePosition = gridComponent.GetRandomRoadPosition();
+      const gridComponent = gridEntity.GetComponent(this.currentGenerator);
       
-      // Reset player physics
-      const playerController = playerEntity.GetComponent('SphereController');
-      if (playerController && playerController.rigidBody) {
-        // Stop all movement
-        playerController.rigidBody.body_.setLinearVelocity(new Ammo.btVector3(0, 0, 0));
-        playerController.rigidBody.body_.setAngularVelocity(new Ammo.btVector3(0, 0, 0));
+      if (!gridComponent) {
+        console.error(`Grid component ${this.currentGenerator} not found`);
+        this.UseFallbackSpawn(playerEntity);
+        return;
       }
       
+      if (typeof gridComponent.GetRandomRoadPosition !== 'function') {
+        console.error('GetRandomRoadPosition method missing on grid component');
+        this.UseFallbackSpawn(playerEntity);
+        return;
+      }
+      
+      // Wait a bit more if component seems uninitialized
+      if (!gridComponent.validRoadPositions || gridComponent.validRoadPositions.length === 0) {
+        console.warn('Grid component not fully initialized, retrying...');
+        setTimeout(() => this.SetSafeSpawnPosition(), 100);
+        return;
+      }
+      
+      const safePosition = gridComponent.GetRandomRoadPosition();
+      
+      this.ResetPlayerPhysics(playerEntity);
       playerEntity.SetPosition(safePosition);
       
       // Place goal point
-      gridComponent.PlaceGoalPoint();
+      if (typeof gridComponent.PlaceGoalPoint === 'function') {
+        gridComponent.PlaceGoalPoint();
+      }
       
-      console.log("Player spawned at safe position:", safePosition);
+      console.log(`Player spawned using ${this.currentGenerator}:`, safePosition);
+    } else {
+      console.error("Grid or player entity not found");
+    }
+  }
+
+  UseFallbackSpawn(playerEntity) {
+    const safePosition = new THREE.Vector3(0, 1, 0);
+    this.ResetPlayerPhysics(playerEntity);
+    playerEntity.SetPosition(safePosition);
+    console.log("Using fallback spawn position:", safePosition);
+  }
+
+  ResetPlayerPhysics(playerEntity) {
+    const playerController = playerEntity.GetComponent('SphereController');
+    if (playerController && playerController.rigidBody) {
+      playerController.rigidBody.body_.setLinearVelocity(new Ammo.btVector3(0, 0, 0));
+      playerController.rigidBody.body_.setAngularVelocity(new Ammo.btVector3(0, 0, 0));
     }
   }
 
@@ -184,7 +241,6 @@ class SphereGame {
   }
 
   StartNewEpisode() {
-    // Reset cooldown
     this.goalCooldown = false;
     
     this.trainingEpisode.episodeCount++;
@@ -194,15 +250,21 @@ class SphereGame {
     // Regenerate entire grid
     const gridEntity = this.entityManager.Get('grid');
     if (gridEntity) {
-      const gridComponent = gridEntity.GetComponent('GridGenerator');
-      if (gridComponent) {
+      const gridComponent = gridEntity.GetComponent(this.currentGenerator);
+      
+      if (gridComponent && typeof gridComponent.RegenerateGrid === 'function') {
         gridComponent.RegenerateGrid();
-        this.trainingEpisode.totalCells = gridComponent.validRoadPositions.length;
+        
+        if (gridComponent.validRoadPositions) {
+          this.trainingEpisode.totalCells = gridComponent.validRoadPositions.length;
+        }
       }
     }
     
     // Set safe spawn position
-    this.SetSafeSpawnPosition();
+    setTimeout(() => {
+      this.SetSafeSpawnPosition();
+    }, 50);
     
     console.log(`Starting episode ${this.trainingEpisode.episodeCount}`);
   }
@@ -224,44 +286,36 @@ class SphereGame {
     
     if (this.crosshair) this.crosshair.update(timeElapsedS);
     
-        // Calculate distance to goal
     this.CalculateGoalDistance();
 
-    // Check for goal collision (only if not in cooldown)
     if (!this.goalCooldown) {
       this.CheckGoalCollision();
     }
     
-    // Track player movement and update training progress
     const gridEntity = this.entityManager.Get('grid');
     const playerEntity = this.entityManager.Get('player');
     
     if (gridEntity && playerEntity) {
-      const gridComponent = gridEntity.GetComponent('GridGenerator');
+      const gridComponent = gridEntity.GetComponent(this.currentGenerator);
       
-      if (gridComponent) {
+      if (gridComponent && typeof gridComponent.MarkCellVisited === 'function') {
         const visited = gridComponent.MarkCellVisited(playerEntity.Position);
         if (visited) {
           this.trainingEpisode.visitedCells++;
         }
         
-        // Calculate completion percentage
         const completion = gridComponent.GetVisitedPercentage();
         
-        // Update UI
         if (this.trainingUI) {
           this.trainingUI.updateProgress(completion, this.trainingEpisode.episodeCount);
         }
         
-        // Check if episode is complete (95% exploration)
         if (completion >= 0.95) {
           this.trainingEpisode.completionTime = (performance.now() - this.trainingEpisode.startTime) / 1000;
           console.log(`Episode ${this.trainingEpisode.episodeCount} completed in ${this.trainingEpisode.completionTime.toFixed(1)} seconds!`);
           
-          // Log episode data for RL training
           this.LogEpisodeData();
           
-          // Start a new episode after a short delay
           setTimeout(() => {
             this.StartNewEpisode();
           }, 2000);
@@ -278,7 +332,6 @@ class SphereGame {
       const goalPosition = goalEntity.Position;
       const playerPosition = playerEntity.Position;
       
-      // Calculate horizontal distance (ignore Y axis)
       const distance = Math.sqrt(
         Math.pow(goalPosition.x - playerPosition.x, 2) +
         Math.pow(goalPosition.z - playerPosition.z, 2)
@@ -288,7 +341,7 @@ class SphereGame {
     } else if (this.trainingUI) {
       this.trainingUI.updateDistance('--');
     }
-}
+  }
 
   CheckGoalCollision() {
     const playerEntity = this.entityManager.Get('player');
@@ -300,15 +353,12 @@ class SphereGame {
       if (goalComponent && goalComponent.CheckCollision(playerEntity.Position)) {
         console.log("Goal reached! Generating new maze...");
         
-        // Set cooldown to prevent multiple triggers
         this.goalCooldown = true;
         
-        // Show celebration message
         if (this.trainingUI) {
           this.trainingUI.showMessage("Goal Reached! Generating new maze...", 2000);
         }
         
-        // Start new episode after a delay
         setTimeout(() => {
           this.StartNewEpisode();
         }, 2000);
@@ -322,12 +372,45 @@ class SphereGame {
       completionTime: this.trainingEpisode.completionTime,
       visitedCells: this.trainingEpisode.visitedCells,
       totalCells: this.trainingEpisode.totalCells,
-      explorationRate: (this.trainingEpisode.visitedCells / this.trainingEpisode.totalCells).toFixed(4)
+      explorationRate: this.trainingEpisode.totalCells > 0 ? 
+        (this.trainingEpisode.visitedCells / this.trainingEpisode.totalCells).toFixed(4) : 0
     };
     
     console.log("Episode Data:", episodeData);
   }
+
+  ToggleGenerator() {
+    this.useDungeonGenerator = !this.useDungeonGenerator;
+    console.log(`Switching to ${this.useDungeonGenerator ? 'DungeonGenerator' : 'GridGenerator'}`);
+    
+    this.StartNewEpisode();
+  }
 }
+
+// Add UI controls for toggling
+document.addEventListener('DOMContentLoaded', () => {
+  const toggleButton = document.createElement('button');
+  toggleButton.textContent = 'Switch to Grid';
+  toggleButton.style.position = 'fixed';
+  toggleButton.style.top = '10px';
+  toggleButton.style.left = '10px';
+  toggleButton.style.zIndex = '10000';
+  toggleButton.style.padding = '10px';
+  toggleButton.style.backgroundColor = '#333';
+  toggleButton.style.color = 'white';
+  toggleButton.style.border = 'none';
+  toggleButton.style.borderRadius = '5px';
+  toggleButton.style.cursor = 'pointer';
+  
+  toggleButton.addEventListener('click', () => {
+    if (window._APP) {
+      window._APP.ToggleGenerator();
+      toggleButton.textContent = window._APP.useDungeonGenerator ? 
+        'Switch to Grid' : 'Switch to Dungeon';
+    }
+  });
+  document.body.appendChild(toggleButton);
+});
 
 let _APP = null;
 window.addEventListener('DOMContentLoaded', async () => {
